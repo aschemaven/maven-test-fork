@@ -112,7 +112,7 @@ jobs:
             --title "Bump default plugin versions to the latest stable 3.x (${{ matrix.branch }})" \
             --body "$(printf 'The lifecycle plugin defaults on this branch are behind the newest stable release below 4.0.0 on Central.\n\n```\n%s\n```\n\nRaised by the `Default plugin version drift` workflow. Verify with a full build before merging: a plugin bump can change behaviour even when it is a patch release.\n' "$(cat changes.txt)")"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: drift-${{ steps.dist.outputs.slug }}
