@@ -1,0 +1,309 @@
+#!/bin/sh
+
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# -----------------------------------------------------------------------------
+# Apache Maven Startup Script
+#
+# Environment Variable Prerequisites
+#
+#   JAVA_HOME           (Optional) Points to a Java installation.
+#   MAVEN_ARGS          (Optional) Arguments passed to Maven before CLI arguments.
+#   MAVEN_OPTS          (Optional) Java runtime options used when Maven is executed.
+#   MAVEN_SKIP_RC       (Optional) Flag to disable loading of mavenrc files.
+#   MAVEN_DEBUG_OPTS    (Optional) Specify the debug options to use. Default value is "-Xdebug -Xrunjdwp:transport=dt_socket,server=y,suspend=y,address=${MAVEN_DEBUG_ADDRESS}" when --debug is used
+#   MAVEN_DEBUG_ADDRESS (Optional) Set the debug address. Default value is "localhost:8000"
+# -----------------------------------------------------------------------------
+
+if [ -z "$MAVEN_SKIP_RC" ] ; then
+
+  if [ -f /usr/local/etc/mavenrc ] ; then
+    . /usr/local/etc/mavenrc
+  fi
+
+  if [ -f /etc/mavenrc ] ; then
+    . /etc/mavenrc
+  fi
+
+  if [ -f "$HOME/.mavenrc" ] ; then
+    . "$HOME/.mavenrc"
+  fi
+
+fi
+
+# OS specific support. $var _must_ be set to either true or false.
+cygwin=false;
+mingw=false;
+case "`uname`" in
+  CYGWIN*) cygwin=true;;
+  MINGW*) mingw=true;;
+esac
+
+## resolve links - $0 may be a link to Maven's home
+PRG="$0"
+
+# need this for relative symlinks
+while [ -h "$PRG" ] ; do
+  ls=`ls -ld "$PRG"`
+  link=`expr "$ls" : '.*-> \(.*\)$'`
+  if expr "$link" : '/.*' > /dev/null; then
+    PRG="$link"
+  else
+    PRG="`dirname "$PRG"`/$link"
+  fi
+done
+
+saveddir=`pwd`
+
+MAVEN_HOME=`dirname "$PRG"`/..
+
+# make it fully qualified
+MAVEN_HOME=`cd "$MAVEN_HOME" && pwd`
+
+cd "$saveddir"
+
+CLASSWORLDS_CONF="$MAVEN_HOME/bin/m2.conf"
+
+# For Cygwin and MinGW, ensure paths are in Unix format before anything is touched
+if $cygwin || $mingw ; then
+  [ -n "$JAVA_HOME" ] &&
+    JAVA_HOME=`cygpath --unix "$JAVA_HOME"`
+fi
+
+if [ -n "$JAVA_HOME" ] ; then
+  if [ -x "$JAVA_HOME/jre/sh/java" ] ; then
+    # IBM's JDK on AIX uses strange locations for the executables
+    JAVACMD="$JAVA_HOME/jre/sh/java"
+  else
+    JAVACMD="$JAVA_HOME/bin/java"
+
+    if [ ! -x "$JAVACMD" ] ; then
+      echo "The JAVA_HOME environment variable is not defined correctly, so Apache Maven cannot be started." >&2
+      echo "JAVA_HOME is set to \"$JAVA_HOME\", but \"\$JAVA_HOME/bin/java\" does not exist." >&2
+      exit 1
+    fi
+  fi
+else
+  JAVACMD="`\\unset -f command; \\command -v java`"
+
+  if [ ! -x "$JAVACMD" ] ; then
+    echo "The java(1) command does not exist in PATH nor is JAVA_HOME set, so Apache Maven cannot be started." >&2
+    exit 1
+  fi
+fi
+
+if ! "$JAVACMD" --enable-native-access=ALL-UNNAMED -version >/dev/null 2>&1; then
+  echo "Error: Apache Maven 4.x requires Java 17 or newer to run." >&2
+  "$JAVACMD" -version >&2
+  echo "Please upgrade your Java installation or set JAVA_HOME to point to a compatible JDK." >&2
+  exit 1
+fi
+
+# traverses directory structure from process work directory to filesystem root
+# first directory with .mvn subdirectory is considered project base directory
+find_maven_basedir() {
+(
+  basedir=`find_file_argument_basedir "$@"`
+  wdir="$basedir"
+  while :
+  do
+    if [ -d "$wdir"/.mvn ] ; then
+      basedir=$wdir
+      break
+    fi
+    if [ "$wdir" = '/' ] ; then
+      break
+    fi
+    wdir=`cd "$wdir/.."; pwd`
+  done
+  echo "$basedir"
+)
+}
+
+find_file_argument_basedir() {
+(
+  basedir=`pwd`
+
+  found_file_switch=0
+  for arg in "$@"; do
+    if [ ${found_file_switch} -eq 1 ]; then
+      if [ -d "${arg}" ]; then
+        basedir=`cd "${arg}" && pwd -P`
+      elif [ -f "${arg}" ]; then
+        basedir=`dirname "${arg}"`
+        basedir=`cd "$basedir" && pwd -P`
+        if [ ! -d "$basedir" ]; then
+          echo "Directory $basedir extracted from the -f/--file command-line argument ${arg} does not exist" >&2
+          exit 1
+        fi
+      else
+        echo "POM file ${arg} specified with the -f/--file command line argument does not exist" >&2
+        exit 1
+      fi
+      break
+    fi
+    if [ "$arg" = "-f" -o "$arg" = "--file" ]; then
+      found_file_switch=1
+    fi
+  done
+  echo "$basedir"
+)
+}
+
+# concatenates all lines of a file and replaces variables
+# Uses Java-based parser to handle all special characters correctly
+# This avoids shell parsing issues with pipes, quotes, @, and other special characters
+# and ensures POSIX compliance (no xargs -0, awk, or complex sed needed)
+# Set MAVEN_DEBUG_SCRIPT=1 to enable debug logging
+concat_lines() {
+  if [ -f "$1" ]; then
+    # Use Java source-launch mode (JDK 11+) to run JvmConfigParser directly
+    # This avoids the need for compilation and temporary directories
+
+    # Debug logging
+    if [ -n "$MAVEN_DEBUG_SCRIPT" ]; then
+      echo "[DEBUG] Found jvm.config file at: $1" >&2
+      echo "[DEBUG] Running JvmConfigParser with Java: $JAVACMD" >&2
+      echo "[DEBUG] Parser arguments: $MAVEN_HOME/bin/JvmConfigParser.java $1 $MAVEN_PROJECTBASEDIR" >&2
+    fi
+
+    # Verify Java is available
+    "$JAVACMD" -version >/dev/null 2>&1 || {
+      echo "Error: Java not found. Please set JAVA_HOME." >&2
+      return 1
+    }
+
+    # Run the parser using source-launch mode
+    # Capture both stdout and stderr for comprehensive error reporting
+    parser_output=$("$JAVACMD" "$MAVEN_HOME/bin/JvmConfigParser.java" "$1" "$MAVEN_PROJECTBASEDIR" 2>&1)
+    parser_exit=$?
+
+    if [ -n "$MAVEN_DEBUG_SCRIPT" ]; then
+      echo "[DEBUG] JvmConfigParser exit code: $parser_exit" >&2
+      echo "[DEBUG] JvmConfigParser output: $parser_output" >&2
+    fi
+
+    if [ $parser_exit -ne 0 ]; then
+      # Parser failed - print comprehensive error information
+      echo "ERROR: JvmConfigParser failed with exit code $parser_exit" >&2
+      echo "  jvm.config path: $1" >&2
+      echo "  Maven basedir: $MAVEN_PROJECTBASEDIR" >&2
+      echo "  Java command: $JAVACMD" >&2
+      echo "  Parser output:" >&2
+      echo "$parser_output" | sed 's/^/    /' >&2
+      exit 1
+    fi
+
+    echo "$parser_output"
+  fi
+}
+
+MAVEN_PROJECTBASEDIR="`find_maven_basedir "$@"`"
+# Read JVM config and append to MAVEN_OPTS, preserving special characters
+_jvm_config="`concat_lines "$MAVEN_PROJECTBASEDIR/.mvn/jvm.config"`"
+if [ -n "$_jvm_config" ]; then
+  if [ -n "$MAVEN_OPTS" ]; then
+    MAVEN_OPTS="$MAVEN_OPTS $_jvm_config"
+  else
+    MAVEN_OPTS="$_jvm_config"
+  fi
+fi
+if [ -n "$MAVEN_DEBUG_SCRIPT" ]; then
+  echo "[DEBUG] Final MAVEN_OPTS: $MAVEN_OPTS" >&2
+fi
+LAUNCHER_JAR=`echo "$MAVEN_HOME"/boot/plexus-classworlds-*.jar`
+LAUNCHER_CLASS=org.codehaus.plexus.classworlds.launcher.Launcher
+
+# For Cygwin and MinGW, switch paths to Windows format before running java(1) command
+if $cygwin || $mingw ; then
+  [ -n "$JAVA_HOME" ] &&
+    JAVA_HOME=`cygpath --windows "$JAVA_HOME"`
+  LAUNCHER_JAR=`cygpath --windows "$LAUNCHER_JAR"`
+  CLASSWORLDS_CONF=`cygpath --windows "$CLASSWORLDS_CONF"`
+  MAVEN_HOME=`cygpath --windows "$MAVEN_HOME"`
+  MAVEN_PROJECTBASEDIR=`cygpath --windows "$MAVEN_PROJECTBASEDIR"`
+fi
+
+handle_args() {
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --debug)
+        if [ -z "$MAVEN_DEBUG_OPTS" ] ; then
+          MAVEN_DEBUG_OPTS="-Xdebug -Xrunjdwp:transport=dt_socket,server=y,suspend=y,address=${MAVEN_DEBUG_ADDRESS:-localhost:8000}"
+        else
+          echo "Ignoring --debug option as MAVEN_DEBUG_OPTS is already set"
+        fi
+        ;;
+      --yjp)
+        if [ ! -f "$YJPLIB" ]; then
+          echo "Error: Unable to autodetect the YJP library location. Please set YJPLIB variable" >&2
+          exit 1
+        fi
+        MAVEN_OPTS="-agentpath:$YJPLIB=onexit=snapshot,onexit=memory,tracing,onlylocal $MAVEN_OPTS"
+        ;;
+      --enc)
+        MAVEN_MAIN_CLASS="org.apache.maven.cling.MavenEncCling"
+        ;;
+      --shell)
+        MAVEN_MAIN_CLASS="org.apache.maven.cling.MavenShellCling"
+        ;;
+      --up)
+        MAVEN_MAIN_CLASS="org.apache.maven.cling.MavenUpCling"
+        ;;
+      *)
+        ;;
+    esac
+    shift
+  done
+}
+
+handle_args "$@"
+MAVEN_MAIN_CLASS=${MAVEN_MAIN_CLASS:=org.apache.maven.cling.MavenCling}
+
+# Build base command string for eval (only contains Maven-controlled values)
+cmd="\"$JAVACMD\" \
+  $MAVEN_OPTS \
+  $MAVEN_DEBUG_OPTS \
+  --enable-native-access=ALL-UNNAMED \
+  -classpath \"$LAUNCHER_JAR\" \
+  \"-Dclassworlds.conf=$CLASSWORLDS_CONF\" \
+  \"-Dmaven.home=$MAVEN_HOME\" \
+  \"-Dmaven.mainClass=$MAVEN_MAIN_CLASS\" \
+  \"-Dlibrary.jline.path=${MAVEN_HOME}/lib/jline-native\" \
+  \"-Dmaven.multiModuleProjectDirectory=$MAVEN_PROJECTBASEDIR\" \
+  $LAUNCHER_CLASS"
+
+if [ -n "$MAVEN_DEBUG_SCRIPT" ]; then
+  echo "[DEBUG] Launching JVM with command:" >&2
+  printf '[DEBUG]   %s' "$cmd" >&2
+  if [ "$MAVEN_MAIN_CLASS" = "org.apache.maven.cling.MavenCling" ]; then
+    printf ' %s' "$MAVEN_ARGS" >&2
+  fi
+  printf ' "%s"' "$@" >&2; echo >&2
+fi
+
+# User arguments ("$@") and MAVEN_ARGS are passed outside the eval'd string
+# to preserve literal values (backslashes, ${...} placeholders) without
+# shell re-parsing. Only the base command uses eval for MAVEN_OPTS word splitting.
+# MAVEN_ARGS is only passed for the default Maven build command (MavenCling),
+# not for sub-commands like --up, --enc, or --shell which have their own options.
+if [ "$MAVEN_MAIN_CLASS" = "org.apache.maven.cling.MavenCling" ]; then
+  eval exec "$cmd" '$MAVEN_ARGS' '"$@"'
+else
+  eval exec "$cmd" '"$@"'
+fi
