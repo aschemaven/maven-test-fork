@@ -1,0 +1,121 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: Default plugin version drift
+
+# The lifecycle plugin versions Maven compiles in are a decision, not a dependency: nothing in the
+# build fails when they fall behind. This job notices, and offers the bump as a pull request.
+on:
+  schedule:
+    # Weekdays, early, so a maintainer finds the report during working days. A run costs one
+    # distribution build per line and only opens a pull request when something actually drifted.
+    - cron: '0 5 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Only report the drift, do not open pull requests'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  drift:
+    name: "${{ matrix.branch }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # One entry per maintained line; add a line here when a new one is branched.
+        branch: [ main ]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # The defaults are read out of a built distribution rather than out of the sources, so the
+      # report reflects what Maven actually injects on this branch.
+      - name: Build the distribution
+        run: mvn -B -DskipTests -Drat.skip=true -PversionlessMavenDist install
+
+      # The build produces an archive, not an exploded directory; unpack it so the tool has a
+      # Maven home to run. No SDKMAN or other installer is involved anywhere in this job.
+      - name: Unpack the distribution
+        id: dist
+        run: |
+          unzip -q apache-maven/target/apache-maven-bin.zip -d "${RUNNER_TEMP}/dist"
+          # versionlessMavenDist unpacks to apache-maven/, a versioned build to apache-maven-<v>/
+          home=$(ls -d "${RUNNER_TEMP}"/dist/apache-maven*/ | head -1)
+          home="${home%/}"
+          [ -x "${home}/bin/mvn" ] || { echo "no distribution unpacked under ${RUNNER_TEMP}/dist"; exit 1; }
+          echo "home=${home}" >> "${GITHUB_OUTPUT}"
+          # artifact names may not contain a slash
+          echo "slug=${GITHUB_REF_NAME//\//-}" >> "${GITHUB_OUTPUT}"
+
+      - name: Report the drift
+        id: report
+        run: |
+          mvn -B -q -f .github/scripts/default-plugin-drift \
+              -Ddrift.maven="${{ steps.dist.outputs.home }}" \
+              -Ddrift.args=--properties > latest.properties
+          echo "--- newest stable versions"
+          cat latest.properties
+
+      - name: Rewrite the defaults
+        run: |
+          mvn -B -q -f .github/scripts/default-plugin-drift -Prepair \
+              -Ddrift.args="--source=${PWD} --report=${PWD}/latest.properties" | tee changes.txt
+
+      - name: Open a pull request
+        # A push never opens pull requests: inputs.dry-run is null there, so it has to be explicit.
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry-run == false) }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git diff --quiet && { echo "no drift on ${{ matrix.branch }}"; exit 0; }
+          branch="bot/default-plugin-versions-${{ matrix.branch }}"
+          # The same identity dependabot uses on this repository.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${branch}"
+          git commit -am "Bump default plugin versions to the latest stable 3.x"
+          git push -f origin "${branch}"
+          # A daily schedule re-runs while a pull request is still open: pushing updated it, so
+          # only create one when there is none.
+          if gh pr list --head "${branch}" --state open --json number --jq 'length' | grep -qv '^0$'; then
+            echo "pull request for ${branch} already open, updated it"
+            exit 0
+          fi
+          gh pr create --base "${{ matrix.branch }}" --head "${branch}" \
+            --title "Bump default plugin versions to the latest stable 3.x (${{ matrix.branch }})" \
+            --body "$(printf 'The lifecycle plugin defaults on this branch are behind the newest stable release below 4.0.0 on Central.\n\n```\n%s\n```\n\nRaised by the `Default plugin version drift` workflow. Verify with a full build before merging: a plugin bump can change behaviour even when it is a patch release.\n' "$(cat changes.txt)")"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: drift-${{ steps.dist.outputs.slug }}
+          path: |
+            latest.properties
+            changes.txt

@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>org.apache.maven.tools</groupId>
+  <artifactId>default-plugin-drift</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+
+  <name>Default plugin version drift check</name>
+  <description>
+    Reports whether the lifecycle plugin versions a Maven distribution ships as defaults are still the
+    newest stable 3.x on Maven Central. Deliberately not a module of the Maven build: it is a tool that
+    inspects a *built* distribution, so it is run on demand and never released.
+  </description>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- GenericQualifiers, i.e. Maven's own notion of "stable", is public since 2.0.21 -->
+    <resolverVersion>2.0.21</resolverVersion>
+    <exec.mainClass>org.apache.maven.tools.drift.DefaultPluginDriftCheck</exec.mainClass>
+    <!-- Which distribution to inspect; by default the Maven that runs this build. -->
+    <drift.maven>${maven.home}</drift.maven>
+    <!-- extra flags for the tool: "fail-on-drift" turns a finding into a build failure (CI),
+         "properties" switches to machine-readable output -->
+    <drift.args></drift.args>
+    <!-- Pinned, not resolved: see DEFAULT_HELP_PLUGIN_VERSION. Declared in pluginManagement below
+         so it is an ordinary coordinate that a dependency bot can raise. -->
+    <version.maven-help-plugin>3.5.2</version.maven-help-plugin>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.maven.resolver</groupId>
+      <artifactId>maven-resolver-api</artifactId>
+      <version>${resolverVersion}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.maven.resolver</groupId>
+      <artifactId>maven-resolver-util</artifactId>
+      <version>${resolverVersion}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.11.4</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <profiles>
+    <!-- Rewrite a checkout to the versions of a report:
+         mvn -Prepair -Ddrift.args="[source]=CHECKOUT [report]=FILE [dry-run]"
+         where the bracketed names carry the usual double dash prefix. -->
+    <profile>
+      <id>repair</id>
+      <properties>
+        <exec.mainClass>org.apache.maven.tools.drift.DefaultPluginDriftRepair</exec.mainClass>
+        <drift.maven />
+      </properties>
+    </profile>
+  </profiles>
+
+  <build>
+    <!-- `mvn` with no goal compiles and runs the check against ${drift.maven}. -->
+    <defaultGoal>verify</defaultGoal>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-help-plugin</artifactId>
+          <version>${version.maven-help-plugin}</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>drift-check</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <!-- A separate JVM, so the tool's exit code fails this build instead of halting Maven. -->
+          <executable>${java.home}/bin/java</executable>
+          <!-- one string, split on whitespace, so ${drift.args} may carry several flags -->
+          <commandlineArgs>-classpath %classpath ${exec.mainClass} --help-plugin-version=${version.maven-help-plugin} ${drift.args} ${drift.maven}</commandlineArgs>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
